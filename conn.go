@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"hash"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -128,7 +127,7 @@ func (conn Conn) doRequest(method string, uri *url.URL, headers map[string]strin
 	}
 
 	tracker := &readerTracker{completedBytes: 0}
-	fd, crc := conn.handleBody(req, data, listener, tracker)
+	fd := conn.handleBody(req, data, listener, tracker)
 	if fd != nil {
 		defer func() {
 			fd.Close()
@@ -149,7 +148,7 @@ func (conn Conn) doRequest(method string, uri *url.URL, headers map[string]strin
 
 	akIf := conn.config.GetCredentials()
 	if akIf.GetSecurityToken() != "" {
-		req.Header.Set(HTTPHeaderOssSecurityToken, akIf.GetSecurityToken())
+		req.Header.Set(HTTPHeaderSecurityToken, akIf.GetSecurityToken())
 	}
 
 	if headers != nil {
@@ -187,13 +186,16 @@ func (conn Conn) doRequest(method string, uri *url.URL, headers map[string]strin
 	event = newProgressEvent(TransferCompletedEvent, tracker.completedBytes, req.ContentLength, 0)
 	publishProgress(listener, event)
 
-	return conn.handleResponse(resp, crc)
+	return conn.handleResponse(resp)
 }
 
 // handleResponse handles response
-func (conn Conn) handleResponse(resp *http.Response, crc hash.Hash64) (*Response, error) {
+func (conn Conn) handleResponse(resp *http.Response) (*Response, error) {
 
 	statusCode := resp.StatusCode
+	requestID := resp.Header.Get(HTTPHeaderRequestID)
+	trackID := resp.Header.Get(HTTPHeaderTrackID)
+
 	if statusCode >= 400 && statusCode <= 505 {
 		// 4xx and 5xx indicate that the operation has error occurred
 		var respBody []byte
@@ -205,20 +207,22 @@ func (conn Conn) handleResponse(resp *http.Response, crc hash.Hash64) (*Response
 		if len(respBody) == 0 {
 			err = ServiceError{
 				StatusCode: statusCode,
-				RequestID:  resp.Header.Get(HTTPHeaderOssRequestID),
+				RequestID:  requestID,
+				TrackID:    trackID,
 			}
 		} else {
 			// Response contains storage service error object, unmarshal
-			srvErr, errIn := serviceErrFromJSON(respBody, resp.StatusCode,
-				resp.Header.Get(HTTPHeaderOssRequestID))
+			srvErr, errIn := serviceErrFromJSON(respBody, resp.StatusCode, requestID)
 			if errIn != nil { // error unmarshaling the error response
-				err = fmt.Errorf("service returned invalid response body, status = %s, RequestId = %s", resp.Status, resp.Header.Get(HTTPHeaderOssRequestID))
+				err = fmt.Errorf("service returned invalid response body, status = %s, RequestId = %s", resp.Status, resp.Header.Get(HTTPHeaderRequestID))
 			} else {
 				err = srvErr
 			}
 		}
 
 		return &Response{
+			RequestID:  requestID,
+			TrackID:    trackID,
 			StatusCode: resp.StatusCode,
 			Headers:    resp.Header,
 			Body:       ioutil.NopCloser(bytes.NewReader(respBody)), // restore the body
@@ -227,6 +231,8 @@ func (conn Conn) handleResponse(resp *http.Response, crc hash.Hash64) (*Response
 		// OSS use 3xx, but response has no body
 		err := fmt.Errorf("service returned %d,%s", resp.StatusCode, resp.Status)
 		return &Response{
+			RequestID:  requestID,
+			TrackID:    trackID,
 			StatusCode: resp.StatusCode,
 			Headers:    resp.Header,
 			Body:       resp.Body,
@@ -235,6 +241,8 @@ func (conn Conn) handleResponse(resp *http.Response, crc hash.Hash64) (*Response
 
 	// 2xx, successful
 	return &Response{
+		RequestID:  requestID,
+		TrackID:    trackID,
 		StatusCode: resp.StatusCode,
 		Headers:    resp.Header,
 		Body:       resp.Body,
@@ -282,9 +290,9 @@ func (conn Conn) LoggerHTTPResp(req *http.Request, resp *http.Response) {
 }
 
 // handleBody handles request body
-func (conn Conn) handleBody(req *http.Request, body io.Reader, listener ProgressListener, tracker *readerTracker) (*os.File, hash.Hash64) {
+func (conn Conn) handleBody(req *http.Request, body io.Reader, listener ProgressListener, tracker *readerTracker) *os.File {
 	var file *os.File
-	var crc hash.Hash64
+	// var crc hash.Hash64
 	reader := body
 	readerLen, err := GetReaderLen(reader)
 	if err == nil {
@@ -321,7 +329,7 @@ func (conn Conn) handleBody(req *http.Request, body io.Reader, listener Progress
 	// 	req.Body = rc
 	// }
 	req.Body = rc
-	return file, crc
+	return file
 }
 
 func readResponseBody(resp *http.Response) ([]byte, error) {

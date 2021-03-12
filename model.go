@@ -8,7 +8,10 @@ import (
 
 // Response defines HTTP response from OSS
 type Response struct {
-	StatusCode     int
+	StatusCode int
+	RequestID  string
+	TrackID    string
+
 	Headers        http.Header
 	Body           io.ReadCloser
 	bodyText       string
